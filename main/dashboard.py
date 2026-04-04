@@ -5,7 +5,7 @@
 import streamlit as st
 import os
 import tempfile
-import google.generativeai as genai
+from groq import Groq
 import pandas as pd
 
 from parser import TelemetryParser
@@ -24,23 +24,21 @@ st.markdown("Завантаж файл `.bin` і отримай аналіз + A
 with st.sidebar:
     st.header("Налаштування")
     try:
-        API_KEY = st.secrets["GEMINI_API_KEY"]
+        groq_api_key  = st.secrets["GROQ_API_KEY"]
     except:
-        API_KEY = None
+        groq_api_key  = None
 
     st.markdown("---")
-    st.caption("Введи API ключ і завантаж файл")
+    st.caption("Після завантаження файлу аналіз запуститься автоматично")
 
 
-# ========== ФУНКЦІЯ ДЛЯ AI-ЗВІТУ ==========
 def generate_ai_report(metrics: dict, api_key: str) -> str:
     """Генерує текстовий звіт про аномалії польоту на основі метрик"""
     if not api_key:
         return "API ключ не введено"
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        client = Groq(api_key=api_key)
 
         prompt = f"""
         Ти експерт з аналізу польотів дронів на базі Ardupilot.
@@ -62,8 +60,13 @@ def generate_ai_report(metrics: dict, api_key: str) -> str:
         Відповідай коротко (3-5 речень).
         """
 
-        response = model.generate_content(prompt)
-        return response.text
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+
+        return response.choices[0].message.content
 
     except Exception as e:
         return f"Помилка при генерації AI звіту: {str(e)}"
@@ -87,7 +90,6 @@ if uploaded_file is not None:
         try:
             parser = TelemetryParser(tmp_path)
             df_gps, df_imu = parser.parse()
-
             metrics = get_metrics(df_gps, df_imu)
 
             # Виводимо метрики у вигляді 4 колонок
@@ -126,13 +128,13 @@ if uploaded_file is not None:
     st.subheader("AI-аналіз аномалій польоту")
 
     if st.button("Згенерувати AI звіт", type="primary"):
-        if not API_KEY:
+        if not groq_api_key:
             st.error("API ключ не налаштовано.")
         elif not metrics:
             st.error("Немає даних для аналізу")
         else:
             with st.spinner("Штучний інтелект аналізує..."):
-                report = generate_ai_report(metrics, API_KEY)
+                report = generate_ai_report(metrics, groq_api_key)
                 st.success("Звіт готовий")
                 st.info(report)
 
