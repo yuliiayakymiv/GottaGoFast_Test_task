@@ -12,6 +12,9 @@ import plotly.graph_objects as go
 
 JUMP_THRESH = 50
 AGL_MAX_M   = 100
+MAX_REALISTIC_SPEED = 50
+MIN_TIME_DELTA = 0.01
+SMOOTH_WINDOW = 5
 
 
 def _to_agl(df: pd.DataFrame) -> pd.DataFrame:
@@ -30,11 +33,6 @@ def _to_agl(df: pd.DataFrame) -> pd.DataFrame:
     def is_agl(s, e):
         return float(np.max(alt[s:e])) < AGL_MAX_M
 
-    print(f"[alt] {len(segs)} segment(s):")
-    for s, e in segs:
-        kind = "AGL" if is_agl(s, e) else "MSL"
-        print(f"rows {s:3d}-{e-1:3d} {kind} range {alt[s:e].min():.1f}–{alt[s:e].max():.1f} m")
-
     agl = alt.copy()
     agl_segs = [(s, e) for s, e in segs if is_agl(s, e)]
     msl_segs = [(s, e) for s, e in segs if not is_agl(s, e)]
@@ -51,9 +49,26 @@ def _to_agl(df: pd.DataFrame) -> pd.DataFrame:
     agl = np.clip(agl, 0, None)
     out = df.copy()
     out["alt_agl"] = agl
-    print(f"[alt] After fix: {agl.min():.1f}–{agl.max():.1f} m "
-          f"start={agl[0]:.1f} end={agl[-1]:.1f}")
     return out
+
+
+def smooth_trajectory(df: pd.DataFrame, window: int = SMOOTH_WINDOW) -> pd.DataFrame:
+    """Smoothes coordinates with a moving average."""
+    df = df.copy()
+    df["east"] = df["east"].rolling(window=window, center=True, min_periods=1).mean()
+    df["north"] = df["north"].rolling(window=window, center=True, min_periods=1).mean()
+    df["up"] = df["up"].rolling(window=window, center=True, min_periods=1).mean()
+    return df
+
+
+def remove_outliers(df: pd.DataFrame, threshold: float = 50) -> pd.DataFrame:
+    """Removes points where coordinates jump more than threshold meters."""
+    df = df.copy()
+    de = df["east"].diff().abs()
+    dn = df["north"].diff().abs()
+    mask = (de < threshold) & (dn < threshold)
+    mask.iloc[0] = True
+    return df[mask].reset_index(drop=True)
 
 
 def wgs84_to_enu(df: pd.DataFrame) -> pd.DataFrame:
@@ -69,14 +84,20 @@ def wgs84_to_enu(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _compute_speed(df: pd.DataFrame) -> np.ndarray:
-    """Compute 3D speed in m/s from ENU coordinates."""
+def _compute_speed(df: pd.DataFrame, max_speed: float = MAX_REALISTIC_SPEED) -> np.ndarray:
+    """Compute 3D speed in m/s from ENU coordinates with realistic limits."""
     de = df["east"].diff().fillna(0)
     dn = df["north"].diff().fillna(0)
     du = df["up"].diff().fillna(0)
     dt = df["timestamp"].diff().replace(0, np.nan)
+
+    dt = dt.clip(lower=MIN_TIME_DELTA)
+
     speed = np.sqrt(de**2 + dn**2 + du**2) / dt
-    return speed.fillna(0).clip(lower=0).values
+
+    speed = speed.clip(upper=max_speed)
+
+    return speed.fillna(0).values
 
 
 def build_3d_figure(
@@ -87,33 +108,53 @@ def build_3d_figure(
     """Create interactive 3D trajectory plot. Color by 'speed' or 'time'."""
     df = wgs84_to_enu(_to_agl(df_gps))
 
+    df = remove_outliers(df, threshold=50)
+    df = smooth_trajectory(df, window=SMOOTH_WINDOW)
+
     if color_by == "speed":
-        c_values, c_label, cscale = _compute_speed(df), "Speed (m/s)", "Plasma"
+        c_values = _compute_speed(df)
+        c_label = "Speed (m/s)"
+        cscale = "Plasma"
+        c_values_display = np.clip(c_values, 0, MAX_REALISTIC_SPEED)
     else:
-        c_values = (df["timestamp"] - df["timestamp"].iloc[0]).values
-        c_label, cscale = "Time (s)", "Viridis"
+        c_values_display = (df["timestamp"] - df["timestamp"].iloc[0]).values
+        c_label = "Time (s)"
+        cscale = "Viridis"
 
     east, north, up = df["east"].values, df["north"].values, df["up"].values
 
     traces = [
         go.Scatter3d(
             x=east, y=north, z=up, mode="markers",
-            marker=dict(size=4, color=c_values, colorscale=cscale,
-                       showscale=True, colorbar=dict(title=c_label, thickness=14, x=1.0)),
-            hovertemplate=f"East: %{{x:.1f}} m<br>North: %{{y:.1f}} m<br>"
-                         f"Alt AGL: %{{z:.1f}} m<br>{c_label}: %{{marker.color:.2f}}<extra></extra>",
+            marker=dict(
+                size=3,
+                color=c_values_display,
+                colorscale=cscale,
+                showscale=True,
+                colorbar=dict(title=c_label, thickness=14, x=1.0)
+            ),
+            hovertemplate=(
+                f"East: %{{x:.1f}} m<br>"
+                f"North: %{{y:.1f}} m<br>"
+                f"Alt AGL: %{{z:.1f}} m<br>"
+                f"{c_label}: %{{marker.color:.2f}}<extra></extra>"
+            ),
             name="GPS fix",
         ),
-        go.Scatter3d(x=east, y=north, z=up, mode="lines",
-                    line=dict(color="rgba(255,255,255,0.3)", width=3),
-                    showlegend=False, hoverinfo="skip"),
+        go.Scatter3d(
+            x=east, y=north, z=up, mode="lines",
+            line=dict(color="rgba(255,255,255,0.3)", width=3),
+            showlegend=False, hoverinfo="skip"
+        ),
     ]
 
     for idx, label, color in [(0, "Start", "lime"), (-1, "End", "red")]:
         traces.append(go.Scatter3d(
             x=[east[idx]], y=[north[idx]], z=[up[idx]],
-            mode="markers+text", marker=dict(size=10, color=color, symbol="diamond"),
-            text=[label], textposition="top center", name=label,
+            mode="markers+text",
+            marker=dict(size=10, color=color, symbol="diamond"),
+            text=[label], textposition="top center",
+            name=label,
         ))
 
     fig = go.Figure(data=traces)
@@ -144,8 +185,11 @@ def build_altitude_chart(df_gps: pd.DataFrame) -> go.Figure:
         hovertemplate="t=%{x:.1f}s  alt=%{y:.1f} m<extra></extra>",
     ))
     fig.update_layout(
-        title="Altitude AGL over time", xaxis_title="Time (s)", yaxis_title="Altitude AGL (m)",
-        paper_bgcolor="#0d0d0d", plot_bgcolor="#111", font=dict(color="white"),
+        title="Altitude AGL over time",
+        xaxis_title="Time (s)",
+        yaxis_title="Altitude AGL (m)",
+        paper_bgcolor="#0d0d0d", plot_bgcolor="#111",
+        font=dict(color="white"),
         margin=dict(l=0, r=0, t=40, b=0),
     )
     return fig
@@ -154,17 +198,25 @@ def build_altitude_chart(df_gps: pd.DataFrame) -> go.Figure:
 def build_speed_chart(df_gps: pd.DataFrame) -> go.Figure:
     """Create speed vs time plot (km/h)."""
     df = wgs84_to_enu(_to_agl(df_gps))
+    df = remove_outliers(df, threshold=50)
+    df = smooth_trajectory(df, window=SMOOTH_WINDOW)
+
     t = df["timestamp"] - df["timestamp"].iloc[0]
     spd = _compute_speed(df) * 3.6
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=t, y=spd, mode="lines", line=dict(color="#f77f00", width=2),
+        x=t, y=spd, mode="lines",
+        line=dict(color="#f77f00", width=2),
         name="Speed (km/h)",
         hovertemplate="t=%{x:.1f}s  v=%{y:.1f} km/h<extra></extra>",
     ))
     fig.update_layout(
-        title="Horizontal speed over time", xaxis_title="Time (s)", yaxis_title="Speed (km/h)",
-        paper_bgcolor="#0d0d0d", plot_bgcolor="#111", font=dict(color="white"),
+        title="Horizontal speed over time",
+        xaxis_title="Time (s)",
+        yaxis_title="Speed (km/h)",
+        paper_bgcolor="#0d0d0d", plot_bgcolor="#111",
+        font=dict(color="white"),
         margin=dict(l=0, r=0, t=40, b=0),
     )
     return fig
