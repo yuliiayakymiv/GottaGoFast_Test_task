@@ -104,20 +104,39 @@ def get_max_acceleration(df_imu):
 
     return round(max_acc, 2)
 
-def get_max_speed_imu(df_imu):
+def get_max_speed_imu(df_imu, gamma=0.995):
     """
-    Обчислює максимальну швидкість (м/с) через інтегрування прискорень
+    Обчислює максимальну швидкість (м/с) через Leaky Integrator,
+    що запобігає лавинному накопиченню похибки (дрейфу).
     """
     if df_imu.empty:
         return 0.0
+        
     t = df_imu['timestamp'].values
-    v_x = cumulative_trapezoid(df_imu['acc_x'], t, initial=0)
-    v_y = cumulative_trapezoid(df_imu['acc_y'], t, initial=0)
-
-    v_z = cumulative_trapezoid(df_imu['acc_z'] - 9.81, t, initial=0)
+    # Рахуємо дельту часу між кожним записом
+    dt = np.diff(t, prepend=t[0]) 
+    
+    #Динамічне калібрування (Bias Removal)
+    # Припускаємо, що перші 50 записів (~0.5 сек) дрон нерухомий
+    bias_x = np.mean(df_imu['acc_x'].iloc[:50])
+    bias_y = np.mean(df_imu['acc_y'].iloc[:50])
+    bias_z = np.mean(df_imu['acc_z'].iloc[:50])
+    
+    # Очищаємо сирі дані від стартового зміщення
+    acc_x = df_imu['acc_x'].values - bias_x
+    acc_y = df_imu['acc_y'].values - bias_y
+    acc_z = df_imu['acc_z'].values - bias_z
+    
+    n = len(t)
+    v_x, v_y, v_z = np.zeros(n), np.zeros(n), np.zeros(n)
+    #Leaky Integrator (Інтегрування з витоком)
+    for i in range(1, n):
+        v_x[i] = v_x[i-1] * gamma + acc_x[i] * dt[i]
+        v_y[i] = v_y[i-1] * gamma + acc_y[i] * dt[i]
+        v_z[i] = v_z[i-1] * gamma + acc_z[i] * dt[i]
+    # Знаходимо загальний вектор швидкості
     v_total = np.sqrt(v_x**2 + v_y**2 + v_z**2)
     return round(np.max(v_total), 2)
-
 
 def get_metrics(df_gps, df_imu):
     """
