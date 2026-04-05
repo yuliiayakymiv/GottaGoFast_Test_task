@@ -59,7 +59,7 @@ def max_horizontal_speed(df_gps):
 
     df = df[df['dt'] > 0]  # drop zero-interval rows
 
-    return round(df['speed_ms'].max() * 3.6, 2)
+    return round(df['speed_ms'].max(), 2)
 
 
 def max_vertical_speed(df_gps):
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     print("="*45)
     print(f"  Total distance        : {metrics['total_distance_m']} m")
     print(f"  Flight duration       : {metrics['duration_s']} sec")
-    print(f"  Max horizontal speed  : {metrics['max_speed_h_kmh']} km/h")
+    print(f"  Max horizontal speed  : {metrics['max_speed_h_kmh']} m/s")
     print(f"  Max vertical speed    : {metrics['max_speed_v_ms']} m/s")
     print(f"  Max altitude gain     : {metrics['max_altitude_gain_m']} m")
     print(f"  Max acceleration      : {metrics['max_acceleration_ms2']} m/s²")
